@@ -4,6 +4,7 @@ import android.content.ActivityNotFoundException;
 import android.content.DialogInterface;
 import android.content.Intent;
 import android.os.Bundle;
+import android.os.Environment;
 import android.speech.RecognizerIntent;
 import android.support.v7.app.AppCompatActivity;
 import android.support.v7.widget.DefaultItemAnimator;
@@ -19,6 +20,7 @@ import android.widget.Toast;
 import com.abrarkotwal.wikisearch.Adapter.Pojo.WikiData;
 import com.abrarkotwal.wikisearch.Adapter.SearchAdapter;
 import com.abrarkotwal.wikisearch.Other.AlertDialogManager;
+import com.abrarkotwal.wikisearch.Other.NetworkBroadcastReceiver;
 import com.abrarkotwal.wikisearch.Other.SingletonInstance;
 import com.abrarkotwal.wikisearch.R;
 import com.android.volley.NoConnectionError;
@@ -32,6 +34,14 @@ import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
 
+import java.io.BufferedReader;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileNotFoundException;
+import java.io.FileOutputStream;
+import java.io.FileReader;
+import java.io.IOException;
+import java.io.InputStreamReader;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
@@ -42,6 +52,7 @@ public class MainActivity extends AppCompatActivity {
     private SearchAdapter adapter;
     private ImageButton voiceSearch;
     private final int REQ_CODE_SPEECH_INPUT = 100;
+    private boolean isConnected;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -56,6 +67,11 @@ public class MainActivity extends AppCompatActivity {
         recyclerView.setHasFixedSize(true);
         recyclerView.setItemAnimator(new DefaultItemAnimator());
 
+        isConnected = NetworkBroadcastReceiver.isConnected();
+        if (!isConnected){
+            fetchOffline();
+        }
+
         searchView.setQueryHint("Start typing to search...");
         searchView.setOnQueryTextListener(new SearchView.OnQueryTextListener() {
             @Override
@@ -66,17 +82,24 @@ public class MainActivity extends AppCompatActivity {
 
             @Override
             public boolean onQueryTextChange(String newText) {
-                if (newText.length() > 2) {
-                    recyclerView.setVisibility(View.VISIBLE);
-                    getSearchData(newText);
+                isConnected = NetworkBroadcastReceiver.isConnected();
+                if (isConnected) {
+                    if (newText.length() > 1) {
+                        getSearchData(newText);
+                    }
+                    else if (newText.length() <= 1){
+                        fetchOffline();
+                    }
                 }
-                else {
-                    recyclerView.setVisibility(View.INVISIBLE);
+                else{
+                    fetchOffline();
                 }
                 return false;
             }
 
         });
+
+
 
         voiceSearch.setOnClickListener(new View.OnClickListener() {
             @Override
@@ -84,6 +107,27 @@ public class MainActivity extends AppCompatActivity {
                 promptSpeechInput();
             }
         });
+    }
+
+    private void fetchOffline() {
+        try {
+            FileInputStream fileIn=openFileInput("request.json");
+            InputStreamReader InputRead= new InputStreamReader(fileIn);
+
+            char[] inputBuffer= new char[1024*1024*8];
+            String content="";
+            int charRead;
+
+            while ((charRead=InputRead.read(inputBuffer))>0) {
+                // char to string conversion
+                String readstring=String.copyValueOf(inputBuffer,0,charRead);
+                content +=readstring;
+            }
+            InputRead.close();
+            parseJsonData(content);
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
     }
 
 
@@ -104,49 +148,19 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void getSearchData(final String searchData) {
-        final List<WikiData> wikiDataList=new ArrayList<>();
-        String url="https://en.wikipedia.org//w/api.php?action=query&format=json&prop=pageimages%7Cpageterms&generator=prefixsearch&redirects=1&formatversion=2&piprop=thumbnail&pithumbsize=200&wbptterms=description&gpssearch="+searchData;
+        String url = "https://en.wikipedia.org//w/api.php?action=query&format=json&prop=pageimages%7Cpageterms&generator=prefixsearch&redirects=1&formatversion=2&piprop=thumbnail&pithumbsize=200&wbptterms=description&gpssearch=" + searchData;
         StringRequest stringRequest = new StringRequest(Request.Method.POST, url,
                 new Response.Listener<String>() {
                     @Override
                     public void onResponse(String response) {
+                        parseJsonData(response);
                         try {
-                            JSONObject mainJsonObject = new JSONObject(response);
-
-                            JSONArray jsonArray = mainJsonObject.getJSONObject("query").getJSONArray("pages");
-
-                            for (int i = 0; i < jsonArray.length(); i++) {
-                                JSONObject jsonObject = jsonArray.getJSONObject(i);
-
-                                WikiData wikiData    = new WikiData();
-                                wikiData.title       = jsonObject.getString("title");
-                                wikiData.pageid      = jsonObject.getString("pageid");
-                                if (jsonObject.has("terms")) {
-                                    JSONArray jaDesc = jsonObject.getJSONObject("terms").getJSONArray("description");
-                                    for (int j = 0; j < jaDesc.length(); j++){
-                                        wikiData.description = jaDesc.getString(j);
-                                    }
-                                }
-                                else{
-                                    wikiData.description = "Not Found";
-                                }
-
-                                if (jsonObject.has("thumbnail")) {
-                                    wikiData.imagepath = jsonObject.getJSONObject("thumbnail").getString("source");
-                                }
-                                else{
-                                    wikiData.imagepath = "Not Found";
-                                }
-
-                                wikiDataList.add(wikiData);
-                            }
-
-                            if (wikiDataList.size() != 0){
-                                adapter = new SearchAdapter(MainActivity.this, wikiDataList);
-                                recyclerView.setAdapter(adapter);
-                            }
-
-                        } catch (JSONException e) {
+                            String textjson= response.toString();
+                            FileOutputStream fos = openFileOutput("request.json",MODE_PRIVATE);
+                            fos.write(textjson.getBytes()); //encode
+                            fos.close();
+                        } catch (IOException e) {
+                            // TODO Auto-generated catch block
                             e.printStackTrace();
                         }
                     }
@@ -167,6 +181,50 @@ public class MainActivity extends AppCompatActivity {
                     }
                 });
         SingletonInstance.getInstance(this).addToRequestQueue(stringRequest);
+    }
+
+    private void parseJsonData(String response) {
+        final List<WikiData> wikiDataList = new ArrayList<>();
+        try {
+            JSONObject mainJsonObject = new JSONObject(response);
+
+            JSONArray jsonArray = mainJsonObject.getJSONObject("query").getJSONArray("pages");
+
+            for (int i = 0; i < jsonArray.length(); i++) {
+                JSONObject jsonObject = jsonArray.getJSONObject(i);
+
+                WikiData wikiData = new WikiData();
+                wikiData.title = jsonObject.getString("title");
+                wikiData.pageid = jsonObject.getString("pageid");
+                if (jsonObject.has("terms")) {
+                    JSONArray jaDesc = jsonObject.getJSONObject("terms").getJSONArray("description");
+                    for (int j = 0; j < jaDesc.length(); j++) {
+                        wikiData.description = jaDesc.getString(j);
+                    }
+                } else {
+                    wikiData.description = "Not Found";
+                }
+
+                if (jsonObject.has("thumbnail")) {
+                    wikiData.imagepath = jsonObject.getJSONObject("thumbnail").getString("source");
+                } else {
+                    wikiData.imagepath = "Not Found";
+                }
+
+                wikiDataList.add(wikiData);
+            }
+
+            if (wikiDataList.size() == 0) {
+                fetchOffline();
+            }
+            else{
+                adapter = new SearchAdapter(MainActivity.this, wikiDataList);
+                recyclerView.setAdapter(adapter);
+            }
+
+        } catch (JSONException e) {
+            e.printStackTrace();
+        }
     }
 
     @Override
